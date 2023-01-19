@@ -1,0 +1,349 @@
+---
+title: "Stroke prediction"
+author: "Artem Sorokin"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# O datasetu:
+
+### Kontext
+
+Podle Světové zdravotnické organizace (WHO) je cévní mozková příhoda celosvětově druhou nejčastější příčinou úmrtí a je zodpovědná za přibližně 11 % všech úmrtí. Tento soubor dat slouží k předpovědi, zda pacient pravděpodobně dostane mrtvici, na základě vstupních parametrů, jako je pohlaví, věk, různá onemocnění a kuřácký status. Každý řádek v datech poskytuje relevantní informace o pacientovi.
+
+### Informace o atributu
+
+1)  id: unikátní identifikátor
+
+2)  gender: "Muž", "Žena" nebo "Jiné"
+
+3)  age: věk pacienta
+
+4)  hypertension: 0 pokud pacient nemá hypertenzi, 1 pokud pacient hypertenzi má
+
+5)  heart_disease: pokud pacient nemá žádné srdeční onemocnění 0, pokud pacient má srdeční onemocnění 1
+
+6)  ever_married (někdy_ženatý): "Ne" nebo "Ano"
+
+7)  work_type (typ práce): "children", "Govt_jov", "Never_worked", "Private" or "Self-employed"
+
+8)  Residence_type: "venkovský" nebo "městský"
+
+9)  avg_glucose_level: průměrná hladina glukózy v krvi
+
+10) bmi: index tělesné hmotnosti
+
+11) smoking_status (stav kouření): "dříve kouřil", "nikdy nekouřil", "kouří" nebo "neznámý".
+
+12) stroke: 1 pokud pacient prodělal mrtvici, nebo 0 pokud ne (cílová proměnná)
+
+viz. <https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset>
+
+```{r echo=TRUE}
+#install.packages("tidyverse")
+#install.packages("naniar")
+#install.packages("ROSE")
+#install.packages("corrplot")
+#install.packages("PerformanceAnalytics")
+#install.packages("caret", dependencies = c("Depends", "Suggests"))
+#install.packages("lava")
+#install.packages("randomForest")
+#install.packages('fastDummies')
+#install.packages('imbalance')
+#install.packages("KernelKnn")
+#install.packages("cvms")
+
+library(dplyr) 
+library(tidyverse)
+library(naniar)
+library(corrplot) # Correlation matrix plot library
+library(PerformanceAnalytics)
+library(caret)
+library(randomForest)
+library(fastDummies)
+library(imbalance)
+library(pROC)
+library(cvms)
+set.seed(101)
+```
+
+```{r}
+data = read.csv("sroke_data.csv")
+head(data)
+``` 
+
+```{r}
+summary(data)
+dim(data)
+```
+# Data preparation and cleaning 
+## Unique values
+```{r}
+unique(data$stroke)
+unique(data$gender)
+unique(data$hypertension)
+unique(data$heart_disease)
+unique(data$ever_married)
+unique(data$work_type)
+unique(data$Residence_type)
+unique(data$smoking_status)
+```
+
+## Searching for missing values
+```{r}
+miss_scan_count(data = data, search = list("N/A", "Unknown"))
+```
+
+## Binary encoding (gender)
+```{r}
+table(data$gender, data$stroke)
+
+data[data$gender=='Other', ] <- NA
+data <- na.omit(data)
+
+data$gender <- as.character(data$gender)
+for (i in 1:length(data$gender)){
+  data$gender[i] <- ifelse(data$gender[i] == "Male", 1, 0)
+}
+
+data$gender <- as.numeric(data$gender)
+```
+
+## Binary encoding (Ever_married)
+```{r}
+table(data$ever_married, data$stroke)
+
+data$ever_married <- as.character(data$ever_married)
+for (i in 1:length(data$ever_married)){
+  data$ever_married[i] <- ifelse(data$ever_married[i] == "Yes", 1, 0)
+}
+data$ever_married <- as.numeric(data$ever_married)
+```
+
+## Binary encoding (Residence type)
+```{r}
+table(data$Residence_type, data$stroke)
+
+
+for (i in 1:length(data$Residence_type)){
+  data$Residence_type[i] <- ifelse(data$Residence_type[i] == "Urban", 1, 0)
+}
+data$Residence_type <- as.numeric(data$Residence_type)
+
+head(data)
+```
+
+## Dummy encoding (work_type)
+```{r}
+table(data$work_type, data$stroke)
+
+# young
+data$work_type <- as.character(data$work_type)
+for (i in 1:length(data$id)) {
+    if (data$work_type[i] == "children" || data$work_type[i] == "Never_worked" ) {
+        data$young[i] <- 1
+    }
+    else {
+        data$young[i] <- 0
+    }      
+}
+
+# Government workers 
+for (i in 1:length(data$id)) {
+    if (data$work_type[i] == "Govt_job") { 
+        data$work_govt[i] <- 1
+    }
+    else {
+        data$work_govt[i] <- 0
+    }      
+}
+
+#Private workers
+for (i in 1:length(data$id)) {
+    if (data$work_type[i] == "Private") { 
+        data$work_privat[i] <- 1
+    }
+    else {
+        data$work_privat[i] <- 0
+    }      
+}
+
+# Self-employed workers
+for (i in 1:length(data$id)) {
+    if (data$work_type[i] == "Self-employed" ) { 
+        data$work_self[i] <- 1
+    }
+    else {
+        data$work_self[i] <- 0
+    }      
+}
+
+#head(data)
+```
+
+## BMI 
+### Replace the missing value with the average value
+```{r}
+data$bmi <- as.numeric(data$bmi)
+data$bmi[is.na(data$bmi)] <- mean(data$bmi, na.rm = T) 
+```
+
+## Smoking status
+### Fill in the missing values according to the distribution of known categories. 
+### And then apply the dummy encoding.
+```{r}
+# Before filling in the missing values
+table(data$smoking_status) 
+prop.table(table(data$smoking_status))
+
+data$smoking_status <- replace(data$smoking_status, data$smoking_status == "Unknown", NA)
+data <- data %>% fill(smoking_status)
+
+# After filling in the missing values
+table(data$smoking_status) 
+prop.table(table(data$smoking_status))
+
+# Renaming for future use of the oversampling methodology
+data$smoking_status <- replace(data$smoking_status, data$smoking_status == "formerly smoked", "formerly_smoked")
+data$smoking_status <- replace(data$smoking_status, data$smoking_status == "never smoked", "never_smoked")
+
+# One-hot encoding
+data <- dummy_cols(data, select_columns = 'smoking_status')
+```
+
+### Removing unnecessary attributes (id, smoking_status, work_type)
+```{r}
+data <- data %>% select(-c(id, smoking_status, work_type))
+```
+
+### Changes in attribute format 
+```{r}
+str(data)
+
+data$gender <- as.integer(data$gender)
+data$ever_married <- as.integer(data$ever_married)
+data$Residence_type <- as.integer(data$Residence_type)
+data$young <- as.integer(data$young)
+data$work_govt <- as.integer(data$work_govt)
+data$work_privat <- as.integer(data$work_privat)
+data$work_self <- as.integer(data$work_self)
+
+data$stroke <- as.factor(data$stroke)
+```
+
+### Scaling
+```{r}
+data$avg_glucose_level <- scale(data$avg_glucose_level)
+data$avg_glucose_level <- as.numeric(data$avg_glucose_level)
+
+data$bmi <- scale(data$bmi)
+data$bmi <- as.numeric(data$bmi)
+
+data$age <- scale(data$age)
+data$age <- as.numeric(data$age)
+```
+
+## Train test split
+#### Divide our dataset into training and test sample 80:20.
+```{r}
+set.seed(42)
+trainIndex <- createDataPartition(data$stroke, p = 0.8, list = FALSE)
+
+dataTrain <- data[trainIndex, ]
+dataTest <- data[-trainIndex, ]
+```
+
+## Oversampling
+#### Add 1,000 positive observations to the training sample and the result is the following distribution of the target attribute - 70:30. 
+```{r}
+cat("Main dataset: ")
+imbalanceRatio(data, classAttr = "stroke")
+cat("Train data: ")
+imbalanceRatio(dataTrain, classAttr = "stroke")
+cat("Test data: ")
+imbalanceRatio(dataTest, classAttr = "stroke")
+
+# Oversampling 
+set.seed(42)
+
+# 1000 positive observations will create a 70/30 ratio in the training dataset
+newRWO <- rwo(dataTrain, numInstances = 1000, classAttr = "stroke")
+
+dataTrain <- rbind(dataTrain, newRWO) # Unification
+
+cat("Train data after oversampling: ")
+imbalanceRatio(dataTrain, classAttr = "stroke")
+```
+
+
+## Random_Forest
+```{r}
+set.seed(42)
+
+# fit the model 
+random_Forest <- randomForest(
+  formula = stroke ~ .,
+  data = dataTrain,
+  cutoff = c(0.8, 0.2)
+)
+
+# display fitted model 
+random_Forest
+
+# plot the MSE 
+plot(random_Forest)
+
+# visualizing the importance of variables of the model
+varImpPlot(random_Forest)
+
+# predict
+pred_test <- predict(random_Forest, newdata = dataTest[, -9], type = 'response')
+confusionMatrix(pred_test, dataTest$stroke, mode = "prec_recall")
+
+# confusion_matrix
+conf_mat <- confusion_matrix(predictions = pred_test, targets = dataTest$stroke)
+plot_confusion_matrix(conf_mat)
+
+# ROC-curve
+roc_score <- roc(response = dataTest$stroke, predictor = factor(pred_test, ordered = TRUE)) 
+plot(roc_score, col="red", lwd=3, main="ROC curve Random Forest")
+auc(roc_score) #AUC score
+
+```
+
+
+
+## Logistic_Regression
+```{r}
+set.seed(42)
+
+# fit the model
+logistic_regression <- glm(stroke~., data=dataTrain, family=binomial)
+summary(logistic_regression)
+
+# prediction
+logit_pred <- predict(logistic_regression, newdata = dataTest[, -9], type = 'response')
+logit_pred[logit_pred > 0.1] = 1
+logit_pred[logit_pred < 0.9] = 0
+
+# Recall and precision
+tbl_2_1 <- table(logit_pred, dataTest$stroke)
+cat('Recall is:')
+recall(tbl_2_1)
+cat('Precision is: ')
+precision(tbl_2_1)
+
+# confusion_matrix
+conf_mat <- confusion_matrix(predictions = logit_pred, targets = dataTest$stroke)
+plot_confusion_matrix(conf_mat)
+
+# ROC-curve 
+roc_score <- roc(response = dataTest$stroke, predictor = factor(logit_pred, ordered = TRUE)) 
+plot(roc_score, col="red", lwd=3, main="ROC curve Random Forest")
+auc(roc_score) #AUC score
+
+```
+For this problem, namely the prediction of stroke, it is extremely important not to overlook a patient who is prone to stroke. In the case of the model, this means that it must be very sensitive to false negatives. After evaluating the results of random forest model and logistic regression model, the second one (logistic regression) shows better results. So in the test sample there were only 13 (1.3%) false negatives, while for the random forest model this result was 26 (2.5%).
